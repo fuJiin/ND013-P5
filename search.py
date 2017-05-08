@@ -12,6 +12,7 @@ def find_cars(img, svc, X_scaler,
               orient, pix_per_cell,
               cell_per_block,
               spatial_size, hist_bins,
+              color=(0,0,255),
               scale=1.5):
     """
     Extract all features for given image in one go.
@@ -123,7 +124,8 @@ def find_cars(img, svc, X_scaler,
                     draw_img,
                     start_coords,
                     end_coords,
-                    color=(0, 0, 255)
+                    color=color,
+                    thickness=6
                 )
                 img_boxes.append(
                     (start_coords, end_coords)
@@ -144,7 +146,7 @@ def apply_threshold(heat_map, threshold):
     return new_map
 
 
-def draw_labeled_bboxes(img, labels):
+def draw_labeled_bboxes(img, labels, color=(0,0,255)):
     # Iterate through all detected cars
     for car_number in range(1, labels[1]+1):
         # Find pixels with each car_number label value
@@ -155,14 +157,13 @@ def draw_labeled_bboxes(img, labels):
         # Define a bounding box based on min/max x and y
         bbox = ((np.min(nonzerox), np.min(nonzeroy)), (np.max(nonzerox), np.max(nonzeroy)))
         # Draw the box on the image
-        cv2.rectangle(img, bbox[0], bbox[1], (0,0,255), 6)
+        cv2.rectangle(img, bbox[0], bbox[1], color, 6)
     # Return the image
     return img
 
 
-def draw_bboxes(img, bboxes):
+def draw_bboxes(img, bboxes, color=(0,0,255)):
     """Draw bounding boxes"""
     for box in bboxes:
-        cv2.rectangle(img, box[0], box[1], (0,0,255), 6)
-
+        cv2.rectangle(img, box[0], box[1], color, 6)
     return img

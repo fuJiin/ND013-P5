@@ -1,3 +1,4 @@
+import os.path
 import glob
 import math
 from copy import copy
@@ -6,6 +7,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from moviepy.editor import VideoFileClip
 from scipy.ndimage.measurements import label
+from sklearn.externals import joblib
 
 from features import extract_features
 from search import apply_threshold, draw_bboxes, find_cars
@@ -20,11 +22,12 @@ def process_imager(svc, X_scaler,
                    spatial_size, hist_bins,
                    scale=1.5,
                    threshold=1,
-                   processor=None):
+                   processor=None,
+                   trace=False):
     """Create function that processes one frame of video"""
 
     def _process_image(img):
-        out_img, heat_map = find_cars(
+        draw_img, heat_map = find_cars(
             img,
             svc=svc, X_scaler=X_scaler,
             x_start_stop=x_start_stop,
@@ -36,77 +39,126 @@ def process_imager(svc, X_scaler,
             cell_per_block=cell_per_block,
             spatial_size=spatial_size,
             hist_bins=hist_bins,
-            scale=scale
+            scale=scale,
+            color=(0,255,0)
         )
         new_map = apply_threshold(heat_map, threshold=threshold)
         labels = label(new_map)
         processor.update(labels)
 
-        return draw_bboxes(np.copy(img), processor.bboxes)
+        if trace:
+            out_img = np.copy(draw_img)
+        else:
+            out_img = np.copy(img)
+
+        return draw_bboxes(
+            out_img,
+            processor.bboxes
+        )
 
     return _process_image
 
 
-def visualize(fig, rows, cols, imgs, titles):
+def visualize(fig, rows, cols, imgs, titles, cmap=None):
     for i, img in enumerate(imgs):
         plt.subplot(rows, cols, i+1)
         plt.title(i+1)
         img_dims = len(img.shape)
 
-        if img_dims < 3:
-            plt.imshow(img, cmap='hot')
-            plt.title(titles[i])
-        else:
-            plt.imshow(img)
-            plt.title(titles[i])
+        if cmap is None:
+            if img_dims < 3:
+                cmap = 'hot'
+            else:
+                cmap = 'gray'
+
+        plt.imshow(img, cmap=cmap)
+        plt.title(titles[i])
 
 
 class VideoProcessor(object):
 
-    def __init__(self, x_max, y_max, margins=100, close_dist=50):
+    def __init__(self, x_max, y_max,
+                 in_margins=100,
+                 out_margins=50,
+                 close_dist=25):
+        self.frame = 0
         self.x_max = x_max
         self.y_max = y_max
-        self.margins = margins
+        self.in_margins = in_margins
+        self.out_margins = out_margins
         self.close_dist = close_dist
         self.bboxes = []
 
-    def find_match(self, bbox):
+    def find_match(self, bbox, potential_matches):
         """
         Checks to see if new box is valid.
         It's valid if it is near an edge, or if close to one of the previous boxes
         """
         matches = []
-        center = self.get_center(bbox)
 
-        for idx, b in enumerate(self.bboxes):
-            b_center = self.get_center(b)
-            dist = self.distance(center, b_center)
-            print('..checking dist between {} and {}'.format(center, b_center))
-            print('..= {}'.format(dist))
+        for idx, b in enumerate(potential_matches):
+            dist = self.distance(bbox, b)
+            print('..checking dist between {} and {} = {}'.format(
+                bbox, b, dist))
 
             if dist <= self.close_dist:
                 matches.append(idx)
 
         return matches
 
-    def distance(self, p0, p1):
-        return math.sqrt((p0[0] - p1[0])**2 + (p0[1] - p1[1])**2)
+    def distance(self, bbox, potential_match):
+        (x_min, y_min), (x_max, y_max) = bbox
+        (x_min_2, y_min_2), (x_max_2, y_max_2) = potential_match
 
-    def near_bounds(self, bbox):
         center = self.get_center(bbox)
+        match_center = self.get_center(potential_match)
+
+        x_dist = None
+        y_dist = None
+
+        # bbox is to right of potential_match
+        if x_min > x_max_2:
+            x_dist = x_min - x_max_2
+        # bbox is to left of potential match
+        elif x_min_2 > x_max:
+            x_dist = x_min_2 - x_max
+        # boxes overlap
+        else:
+            x_dist = 0
+            # x_dist = abs(match_center[0] - center[0])
+
+        # bbox is on top of potential_match
+        if y_min > y_max_2:
+            y_dist = y_min - y_max_2
+        # bbox is below potential match
+        elif y_min_2 > y_max:
+            y_dist = y_min_2 - y_max
+        # boxes overlap
+        else:
+            y_dist = 0
+            # y_dist = abs(match_center[1] - center[1])
+
+        return math.sqrt((x_dist ** 2) + (y_dist ** 2))
+
+    def near_bounds(self, bbox, margins):
+        (x_min, y_min), (x_max, y_max) = bbox
+        # center = self.get_center(bbox)
 
         # Close to 0s
-        if (center[0] <= self.margins) or (center[1] <= self.margins):
+        # if (center[0] <= self.margins) or (center[1] <= self.margins):
+        if (x_min <= margins) or (y_min <= margins):
             return True
         # Close to x_max
-        if (self.x_max - center[0]) <= self.margins:
+        # if (self.x_max - center[0]) <= self.margins:
+        if (self.x_max - x_max) <= margins:
             return True
         # Close to y_max
-        if (self.y_max - center[1]) <= self.margins:
+        # if (self.y_max - center[1]) <= self.margins:
+        if (self.y_max - y_max) <= margins:
             return True
         return False
 
-    def smooth_boxes(self, bboxes):
+    def smooth_bboxes(self, bboxes):
         """
         Create new bounding box by smoothing over a collection of bounding boxes.
         """
@@ -126,51 +178,87 @@ class VideoProcessor(object):
             (int(np.average(x_maxes)), int(np.average(y_maxes)))
         )
 
+    def label_bboxes(self, labels):
+        bboxes = []
+
+        for car_number in range(1, labels[1] + 1):
+            nonzero = (labels[0] == car_number).nonzero()
+            nonzeroy = np.array(nonzero[0])
+            nonzerox = np.array(nonzero[1])
+            bbox = ((np.min(nonzerox), np.min(nonzeroy)),
+                    (np.max(nonzerox), np.max(nonzeroy)))
+            bboxes.append(bbox)
+
+        return bboxes
+
     def update(self, labels):
         """
         Checks new array of boxes against previous boxes.
         Removes invalid boxes.
         """
-        if len(labels) > 0:
-            new_boxes = copy(self.bboxes)
-            # grouped_labels = group_labels(labels)
+        new_bboxes = copy(self.bboxes)
+        label_bboxes = self.label_bboxes(labels)
 
-            for car_number in range(1, labels[1] + 1):
-                nonzero = (labels[0] == car_number).nonzero()
-                nonzeroy = np.array(nonzero[0])
-                nonzerox = np.array(nonzero[1])
-                bbox = ((np.min(nonzerox), np.min(nonzeroy)),
-                        (np.max(nonzerox), np.max(nonzeroy)))
+        add_bboxes = []
+        add_label_idx = set([])
+        prune_idx = set([])
 
-                print(bbox)
-                match_idx = self.find_match(bbox)
+        match_map = {}
 
-                # Check to see if it's new car coming into frame
-                if match_idx:
-                    print('>>> Found matches: {}'.format(match_idx))
+        # Prune bboxes that don't appear in labels, and are close to margins
+        print('>>> Updating {}'.format(self.frame))
+        print('  > Pruning old boxes ({})'.format(len(new_bboxes)))
+        for i, bbox in enumerate(new_bboxes):
+            match_idx = self.find_match(bbox, label_bboxes)
 
-                    # Create smooth box
-                    matched_bboxes = [new_boxes[idx] for idx in match_idx]
-                    print(matched_bboxes)
-                    matched_bboxes.append(bbox)
-                    smoothed_box = self.smooth_boxes(matched_bboxes)
+            if not match_idx and self.near_bounds(
+                    bbox, margins=self.out_margins):
+                prune_idx.add(i)
 
-                    # Pop old boxes
-                    new_boxes = [
-                        v for i, v in enumerate(new_boxes)
-                        if i not in match_idx
-                    ]
-                    # Append smoothed box
-                    new_boxes.append(smoothed_box)
-                else:
-                    # Otherwise check to see if it's near bounds as a new car
-                    is_new = self.near_bounds(bbox)
+        # Process labeled bboxes
+        print('  > Processing labels ({})'.format(len(labels)))
+        for i, bbox in enumerate(label_bboxes):
+            match_idx = self.find_match(bbox, new_bboxes)
 
-                    if is_new:
-                        print('>>> Near bounds!')
-                        new_boxes.append(bbox)
+            if match_idx:
 
-            self.bboxes = new_boxes
+                # Store matches for processing
+                for idx in match_idx:
+                    if not match_map.get(idx):
+                        match_map[idx] = []
+                    match_map[idx].append(i)
+
+            # Otherwise add if first frame or near bounds
+            elif self.frame == 0 or self.near_bounds(
+                    bbox, margins=self.in_margins):
+                add_label_idx.add(i)
+
+        print('  > Processing matches ({})'.format(len(match_map)))
+        for idx, matches in match_map.items():
+            prune_idx.add(idx)  # remove original regardless
+
+            # If multiple labels to existing boxes, break into labels
+            if len(matches) > 1:
+                add_label_idx |= set(matches)
+
+            # If 1-1 label-bbox mapping, smooth into new box
+            else:
+                _grouped_bboxes = [new_bboxes[idx], label_bboxes[matches[0]]]
+                smoothed_bbox = self.smooth_bboxes(_grouped_bboxes)
+                add_bboxes.append(smoothed_bbox)
+
+        # Prune and add bboxes
+        print('  > Updating bboxes')
+        new_bboxes = [
+            v for i, v in enumerate(new_bboxes)
+            if i not in prune_idx
+        ]
+        for idx in add_label_idx:
+            add_bboxes.append(label_bboxes[idx])
+
+        new_bboxes += add_bboxes
+        self.bboxes = new_bboxes
+        self.frame += 1
 
     def get_center(self, bbox):
         (x_min, y_min), (x_max, y_max) = bbox
@@ -202,49 +290,71 @@ if __name__ == '__main__':
     xy_window = (128, 128)
     scale = 1.5
     threshold = 2
-    output_path = 'processed_video.mp4'
+    output_path = 'detailed_processed_video.mp4'
+
+    model_path = 'model.pkl'
+    X_scaler_path = 'X_scaler.pkl'
 
     # ================
     # Train classifier
     # ================
+    model = None
+    X_scaler = None
 
-    # Get data
-    cars = glob.glob('./data/vehicles/**/*.png')
-    notcars = glob.glob('./data/non-vehicles/**/*.png')
+    if os.path.isfile(model_path):
+        model = joblib.load(model_path)
 
-    # Extract features
-    print('Extracting car features...')
-    car_features = extract_features(
-        cars,
-        color_space=color_space,
-        spatial_size=spatial_size, hist_bins=hist_bins,
-        orient=orient, pix_per_cell=pix_per_cell,
-        cell_per_block=cell_per_block,
-        hog_channel=hog_channel, spatial_feat=spatial_feat,
-        hist_feat=hist_feat, hog_feat=hog_feat
-    )
+    if os.path.isfile(X_scaler_path):
+        X_scaler = joblib.load(X_scaler_path)
 
-    print('Extracting not car features...')
-    notcar_features = extract_features(
-        notcars,
-        color_space=color_space,
-        spatial_size=spatial_size, hist_bins=hist_bins,
-        orient=orient, pix_per_cell=pix_per_cell,
-        cell_per_block=cell_per_block,
-        hog_channel=hog_channel, spatial_feat=spatial_feat,
-        hist_feat=hist_feat, hog_feat=hog_feat
-    )
+    if model is None:
+        # Get data
+        cars = glob.glob('./data/vehicles/**/*.png')
+        notcars = glob.glob('./data/non-vehicles/**/*.png')
 
-    X, X_scaler = generate_X(car_features, notcar_features)
-    y = generate_y(car_features, notcar_features)
+        # Extract features
+        print('Extracting car features...')
+        car_features = extract_features(
+            cars,
+            color_space=color_space,
+            spatial_size=spatial_size, hist_bins=hist_bins,
+            orient=orient, pix_per_cell=pix_per_cell,
+            cell_per_block=cell_per_block,
+            hog_channel=hog_channel, spatial_feat=spatial_feat,
+            hist_feat=hist_feat, hog_feat=hog_feat
+        )
 
-    model = train_model(X, y)
+        print('Extracting not car features...')
+        notcar_features = extract_features(
+            notcars,
+            color_space=color_space,
+            spatial_size=spatial_size, hist_bins=hist_bins,
+            orient=orient, pix_per_cell=pix_per_cell,
+            cell_per_block=cell_per_block,
+            hog_channel=hog_channel, spatial_feat=spatial_feat,
+            hist_feat=hist_feat, hog_feat=hog_feat
+        )
+
+        # Load or create scaler
+        save_scaler = (True if X_scaler is None else False)
+
+        X, X_scaler = generate_X(
+            car_features, notcar_features,
+            X_scaler=X_scaler
+        )
+        y = generate_y(car_features, notcar_features)
+        if save_scaler:
+            joblib.dump(X_scaler, X_scaler_path)
+
+        model = train_model(X, y)
+        joblib.dump(model, model_path)
 
     # =============
     # Process video
     # =============
 
-    clip = VideoFileClip('project_video.mp4').subclip(5, 7)
+    clip = VideoFileClip('project_video.mp4')#.subclip(27, -1)
+    # clip = VideoFileClip('project_video.mp4').subclip(27, 37)
     frame = clip.get_frame(0)
 
     processor = VideoProcessor(
@@ -265,7 +375,8 @@ if __name__ == '__main__':
         hist_bins=hist_bins,
         scale=scale,
         threshold=threshold,
-        processor=processor
+        processor=processor,
+        trace=False
     )
 
     print('Processing video...')

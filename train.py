@@ -7,16 +7,19 @@ from sklearn.svm import LinearSVC
 from sklearn.utils import shuffle
 
 
-def generate_X(car_features, notcar_features):
+def generate_X(car_features, notcar_features, X_scaler=None):
     """Stack and normalize features"""
     X = np.vstack((car_features, notcar_features)).astype(np.float64)
-    X_scaler = StandardScaler().fit(X)
+
+    if X_scaler is None:
+        X_scaler = StandardScaler().fit(X)
+
     scaled_X = X_scaler.transform(X)
     return scaled_X, X_scaler
 
 
 def generate_y(car_features, notcar_features):
-    """Generate labels for features"""
+    """Generate (labels) for features"""
     return np.hstack((
         np.ones(len(car_features)),
         np.zeros(len(notcar_features))
