@@ -1,1 +1,11 @@
 *.DS_Store
+
+# Notebooks
+.ipynb_checkpoints/**/*
+
+# Pickles
+*.pkl
+
+# Data
+data/**/*
+test.mp4
